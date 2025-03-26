@@ -1,0 +1,309 @@
+---
+title: "Analysis: Clustifyr example"
+subtitle: "an example showing the use of clustifyr to identify cell types"
+author: 
+  name: "BBSR Bioinformatics"
+  affiliation: 
+    name: "University of Colorado Cancer Center"
+    url: "https://medschool.cuanschutz.edu/colorado-cancer-center"
+abstract:
+  ""
+
+editor: source
+theme: cosmo
+number-sections: true
+link-citations: true
+link-external-references: true
+
+format:
+  html:
+    embed-resources: true
+    self_contained: true
+    highlight-style: pygments
+    code-fold: false
+    code-summary: "[code]"
+    code-overflow: wrap
+    toc: true
+    toc-depth: 2
+    toc-location: right  
+    grid:
+      sidebar-width: 0px
+      body-width: 1800px
+      margin-width: 200px
+      gutter-width: 10px
+
+execute:
+  warning: false
+  message: false
+  fig.align: "center"
+
+
+---
+
+## Notes
+
+Here we will load the 10X Genomics PBMC dataset, process it in the standard Seurat tutorial method and then demonstrate the use `clustifyr` to identify cell types.
+
+The `clustifyr` tutorial can be found here:
+<https://www.bioconductor.org/packages/release/bioc/vignettes/clustifyr/inst/doc/clustifyr.html>
+
+### Samples
+
+Dataset of Peripheral Blood Mononuclear Cells (PBMC) freely available from 10X Genomics. There are 2,700 single cells that were sequenced on the Illumina NextSeq 500. The raw data can be found here: <https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz>
+
+## Environment
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align='center')
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(Seurat)
+library(patchwork)
+library(clustifyr)
+library(ComplexHeatmap)
+library(DT)
+
+set.seed(87645893)
+```
+
+## Load data
+
+```{r}
+# Load the PBMC dataset
+pbmc.data <- Read10X(data.dir = "filtered_gene_bc_matrices/hg19/")
+so <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+so
+```
+
+## Preprocess data
+
+```{r}
+so[["percent.mt"]] <- PercentageFeatureSet(so, pattern = "^MT-")
+VlnPlot(so, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+```
+
+```{r}
+plot1 <- FeatureScatter(so, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(so, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+```{r}
+# Filter cells based on nCount_RNA, nFeature_RNA, and percent.mt
+so <- subset(so, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+```
+
+## Normalize data
+
+```{r}
+# Normalize the data
+so <- NormalizeData(so, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+## Identify variable features
+
+```{r}
+#| fig.width: 16
+# Identify the 2,000 most highly variable features
+so <- FindVariableFeatures(so, selection.method = "vst", nfeatures = 2000)
+top10 <- head(VariableFeatures(so), 10)
+plot1 <- VariableFeaturePlot(so)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+## Scale data
+
+```{r}
+# Scale the data
+so <- ScaleData(so, features = rownames(so))
+```
+
+## Perform PCA
+
+```{r}
+# Perform PCA
+so <- RunPCA(so, features = VariableFeatures(object = so))
+print(so[["pca"]], dims = 1:2, ncol = 2)
+VizDimLoadings(so, dims = 1:2, reduction = "pca")
+DimPlot(so, reduction = "pca")
+DimHeatmap(so, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+## Determine the dimensionality of the data
+
+```{r}
+ElbowPlot(so)
+```
+
+## Cluster the cells
+
+```{r}
+# Cluster the cells
+so <- FindNeighbors(so, dims = 1:10)
+so <- FindClusters(so, resolution = 0.5)
+so <- RunUMAP(so, dims = 1:10)
+
+DimPlot(so, reduction = "umap", label = TRUE)
+```
+
+## Clustifyr: Using a gene marker list
+
+This examples uses the PanglaoDB marker gene list to identify cell types in the PBMC dataset.
+
+### Load marker gene list
+
+```{r}
+# load panglaodb markers tsv
+markers <- read.csv("../marker-gene-lists/PanglaoDB_markers_27_Mar_2020.tsv", sep = "\t")
+
+datatable(markers, options = list(pageLength = 5))
+```
+
+### Filter for human genes
+
+```{r}
+#filter for human genes; species column contains Hs for human
+human_markers <- markers[grepl("Hs", markers$species),]
+```
+
+### Convert to dataframe with columns as cell type and rows as gene names
+
+This is the format that clustifyr expects the marker gene list to be in. NAs should pad where there are fewer genes for a given cell type.
+
+```{r}
+# convert to dataframe with columns as cell type and rows as gene names
+gene_list <- human_markers %>%
+  select(cell.type, official.gene.symbol) %>%
+  distinct() %>%
+  group_split(cell.type) %>%
+  setNames(map_chr(., ~ .x$cell.type[1])) %>%
+  map(~ .x$official.gene.symbol)
+
+# Pad to equal length and bind as dataframe
+max_len <- max(lengths(gene_list))
+cell_type_markers <- gene_list %>%
+  map(~ c(.x, rep(NA, max_len - length(.x)))) %>%
+  bind_cols()
+
+datatable(cell_type_markers, options = list(pageLength = 10))
+
+```
+
+### Optionally filter for cell types of interest
+
+```{r}
+#| eval: false
+
+# Optionally filter column names for cell types of interest
+cell_type_markers <- cell_type_markers %>%
+  select("B cell", "T cell", "NK cell", "Monocyte", "Macrophage", "Dendritic cell", "Mast cell", "Neutrophil", "Eosinophil", "Basophil", "Fibroblast", "Endothelial")
+
+```
+
+### Run clustify_lists() to generate correlation matrix
+
+```{r}
+# Available metrics include: "hyper", "jaccard", "spearman", "gsea"
+list_res <- clustify_lists(
+    input = so, # matrix of normalized single-cell RNA-seq counts
+    cluster_col = "RNA_snn_res.0.5", # name of column in meta.data containing cell clusters
+    marker = cell_type_markers, # list of known marker genes
+    marker_inmatrix = FALSE,
+    metric = "jaccard", # test to use for assigning cell types
+    obj_out = FALSE # return Seurat object
+)
+```
+
+### Plot heatmap of correlation matrix
+
+```{r}
+#| fig.height: 10
+#| fig.width: 30
+plot_cor_heatmap(
+    cor_mat = list_res, # matrix of correlation coefficients from clustify_lists()
+    cluster_rows = TRUE, # cluster by row
+    cluster_columns = TRUE, # cluster by column
+    legend_title = "jaccard" # title of heatmap legend
+)
+
+datatable(list_res, options = list(pageLength = 5))
+```
+
+
+### Assign cell types to Seurat object using clustify_lists()
+
+```{r}
+so_res <- clustify_lists(
+    input = so, # matrix of normalized single-cell RNA-seq counts
+    cluster_col = "RNA_snn_res.0.5", # name of column in meta.data containing cell clusters
+    marker = cell_type_markers, # list of known marker genes
+    marker_inmatrix = FALSE,
+    metric = "jaccard", # test to use for assigning cell types
+    obj_out = TRUE # return Seurat object
+)
+
+# clustifyr stores the cell type assignments in the metadata column "type"
+so_res <- SetIdent(so_res, value = "type")
+
+DimPlot(so_res, reduction="umap", label = TRUE, , pt.size = 0.2) + NoLegend()
+```
+## Clustifyr: Using an existing annotated Seurat object
+
+### Load reference Seurat object
+
+```{r}
+# Load the Seurat object
+so_ref <- readRDS("so_ref.rds")
+so_ref
+datatable(so_ref@meta.data)
+```
+
+### Build reference matrix from previously annotated Seurat object
+
+```{r}
+ref_mat <- seurat_ref(
+  seurat_object = so_ref,
+  cluster_col = "cell_types"
+)
+```
+
+### Run clustify directly on your unannotated Seurat object
+
+```{r}
+so_res2 <- clustify(
+  input = so,                      # unannotated Seurat object
+  ref_mat = ref_mat,               # matrix of average expression per reference cell type
+  cluster_col = "seurat_clusters", # or whatever your cluster column is
+  obj_out = FALSE                   # return Seurat object with metadata updated
+)
+
+plot_cor_heatmap(
+  cor_mat = so_res2,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE)
+
+```
+
+```{r}
+so_res2 <- clustify(
+  input = so,                      # unannotated Seurat object
+  ref_mat = ref_mat,               # matrix of average expression per reference cell type
+  cluster_col = "seurat_clusters", # or whatever your cluster column is
+  obj_out = TRUE                   # return Seurat object with metadata updated
+)
+
+# clustifyr stores the cell type assignments in the metadata column "type"
+so_res2 <- SetIdent(so_res2, value = "type")
+DimPlot(so_res2, reduction="umap", label = TRUE, pt.size = 0.2) + NoLegend()
+```
+## Session info
+
+```{r}
+sessionInfo()
+```

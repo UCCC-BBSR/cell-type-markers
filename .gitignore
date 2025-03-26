@@ -1,0 +1,5 @@
+.DS_Store
+.vscode/settings.json
+/example-usage-clustifyr/renv
+example-usage-clustifyr/.Rprofile
+example-usage-clustifyr/so_ref.rds
